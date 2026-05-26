@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ninja Buah AR - 2 Player Mario Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', Courier, monospace; }
+        #ui { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: white; font-size: 28px; z-index: 100; text-shadow: 3px 3px 0px #ff0000; text-align: center; width: 100%; pointer-events: none; }
+        canvas { display: block; background: transparent; }
+        #input_video { display: none; }
+        #overlay {
+            position: absolute; width: 100%; height: 100%; background: rgba(0,0,0,0.85);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 200; color: white; text-align: center;
+        }
+        button {
+            padding: 20px 50px; font-size: 24px; cursor: pointer; border: 4px solid white;
+            border-radius: 10px; background: #e74c3c; color: white; font-weight: bold;
+            box-shadow: 5px 5px 0px #c0392b; transition: 0.1s;
+        }
+        button:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0px #c0392b; }
+        .p1 { color: #00ecff; } .p2 { color: #ff0055; }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <h1 style="font-size: 48px; margin-bottom: 10px;">SUPER NINJA BROS</h1>
+        <p style="font-size: 18px;">Siapkan <span class="p1">Jari Telunjuk Kiri</span> & <span class="p2">Jari Telunjuk Kanan</span>!<br>Potong buah bersama-sama!</p>
+        <button onclick="startGame()">MULAI PETUALANGAN</button>
+    </div>
+
+    <div id="ui">
+        SKOR: <span id="score">0</span> | NYAWA: <span id="lives">3</span>
+    </div>
+    
+    <video id="input_video"></video>
+    <canvas id="output_canvas"></canvas>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const scoreElement = document.getElementById('score');
+        const livesElement = document.getElementById('lives');
+
+        let audioCtx, musicInterval;
+        let score = 0, lives = 3, gameActive = false;
+        let fruits = [], particles = [];
+
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+
+        // --- SYNTHESIZER MUSIK SUPER MARIO (8-BIT) ---
+        function playNote(freq, start, duration) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'square'; // Karakteristik suara Nintendo (NES)
+            osc.frequency.setValueAtTime(freq, start);
+            gain.gain.setValueAtTime(0.1, start);
+            gain.gain.exponentialRampToValueAtTime(0.01, start + duration);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(start);
+            osc.stop(start + duration);
+        }
+
+        function playMarioTheme() {
+            const now = audioCtx.currentTime;
+            const tempo = 0.15;
+            // Nada Ikonik: E5 E5 E5 C5 E5 G5 G4
+            const melody = [
+                {f: 659, d: tempo}, {f: 659, d: tempo}, {f: 0, d: tempo}, {f: 659, d: tempo}, 
+                {f: 0, d: tempo}, {f: 523, d: tempo}, {f: 659, d: tempo}, {f: 0, d: tempo}, 
+                {f: 783, d: tempo}, {f: 0, d: tempo*2}, {f: 392, d: tempo}
+            ];
+            let time = now;
+            melody.forEach(note => {
+                if(note.f > 0) playNote(note.f, time, note.d);
+                time += note.d;
+            });
+        }
+
+        function playSliceSound(isPlayer2) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(isPlayer2 ? 1200 : 800, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            gain.connect(audioCtx.destination);
+            osc.connect(gain);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+        }
+
+        // --- LOGIKA GAME ---
+        class Fruit {
+            constructor() {
+                this.x = Math.random() * (canvasElement.width - 100) + 50;
+                this.y = canvasElement.height + 50;
+                this.radius = 45;
+                this.color = `hsl(${Math.random() * 360}, 80%, 60%)`;
+                this.vx = (Math.random() - 0.5) * 12;
+                this.vy = -(Math.random() * 5 + 15);
+                this.sliced = false;
+            }
+            update() {
+                this.x += this.vx; this.y += this.vy; this.vy += 0.25;
+                if (this.y > canvasElement.height + 100 && !this.sliced) {
+                    this.sliced = true; lives--; livesElement.innerText = lives;
+                    if (lives <= 0) gameOver();
+                }
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x; this.y = y; this.color = color;
+                this.vx = (Math.random() - 0.5) * 20;
+                this.vy = (Math.random() - 0.5) * 20;
+                this.alpha = 1;
+            }
+            update() { this.x += this.vx; this.y += this.vy; this.vy += 0.4; this.alpha -= 0.03; }
+        }
+
+        function startGame() {
+            document.getElementById('overlay').style.display = 'none';
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            gameActive = true;
+            camera.start();
+            // Putar musik Mario setiap 4 detik
+            playMarioTheme();
+            musicInterval = setInterval(playMarioTheme, 4000);
+        }
+
+        function onResults(results) {
+            if (!gameActive) return;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.translate(canvasElement.width, 0); canvasCtx.scale(-1, 1);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.restore();
+
+            if (results.multiHandLandmarks) {
+                results.multiHandLandmarks.forEach((landmarks, index) => {
+                    // Landmark 8 = Telunjuk
+                    const hx = (1 - landmarks[8].x) * canvasElement.width;
+                    const hy = landmarks[8].y * canvasElement.height;
+                    const isP2 = index === 1; // Tangan kedua
+
+                    // Gambar Kursor (P1 Biru, P2 Merah)
+                    canvasCtx.fillStyle = isP2 ? "#ff0055" : "#00ecff";
+                    canvasCtx.shadowBlur = 20; canvasCtx.shadowColor = canvasCtx.fillStyle;
+                    canvasCtx.beginPath(); canvasCtx.arc(hx, hy, 15, 0, Math.PI*2); canvasCtx.fill();
+                    canvasCtx.shadowBlur = 0;
+
+                    // Cek Tebasan
+                    fruits.forEach(f => {
+                        if (!f.sliced && Math.hypot(f.x - hx, f.y - hy) < f.radius + 30) {
+                            f.sliced = true; score += 10; scoreElement.innerText = score;
+                            playSliceSound(isP2);
+                            for(let i=0; i<15; i++) particles.push(new Particle(f.x, f.y, f.color));
+                        }
+                    });
+                });
+            }
+            updateFrames();
+        }
+
+        function updateFrames() {
+            if (Math.random() < 0.04) fruits.push(new Fruit());
+            fruits = fruits.filter(f => !f.sliced && f.y < canvasElement.height + 150);
+            fruits.forEach(f => {
+                f.update();
+                canvasCtx.fillStyle = f.color;
+                canvasCtx.beginPath(); canvasCtx.arc(f.x, f.y, f.radius, 0, Math.PI*2); canvasCtx.fill();
+            });
+            particles = particles.filter(p => p.alpha > 0);
+            particles.forEach(p => {
+                p.update();
+                canvasCtx.globalAlpha = p.alpha; canvasCtx.fillStyle = p.color;
+                canvasCtx.fillRect(p.x, p.y, 10, 10);
+            });
+            canvasCtx.globalAlpha = 1;
+        }
+
+        function gameOver() {
+            gameActive = false;
+            clearInterval(musicInterval);
+            alert("GAME OVER!\nSkor Bersama: " + score);
+            location.reload();
+        }
+
+        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({ 
+            maxNumHands: 2, // AKTIFKAN 2 TANGAN
+            modelComplexity: 1, 
+            minDetectionConfidence: 0.5, 
+            minTrackingConfidence: 0.5 
+        });
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { if(gameActive) await hands.send({image: videoElement}); },
+            width: 1280, height: 720
+        });
+    </script>
+</body>
+</html>
